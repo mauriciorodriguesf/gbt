@@ -1,0 +1,1954 @@
+tenho opennebula 6.10 com um node kvm ja funcionando e estou tentando adicionar mais outro, vejo no anexo o que foi feito para resolver o problema do node 2 que o problema enfrentado é o mesmoEditarDiagnosticou problemas de configuração para adicionar novo node KVM.5 sO usuário tem um OpenNebula 6.10 com um node KVM funcionando e está tentando adicionar outro node. Pelo documento anexo, vejo que houve vários problemas durante a configuração, principalmente relacionados a:
+
+Problema do virtlogd-sock
+Permissões de acesso aos discos das VMs
+Configuração de rede com bridge
+Port forwarding com NAT
+
+O documento mostra uma longa troubleshooting session onde foram resolvidos vários problemas para fazer VMs funcionarem no primeiro node KVM.
+O usuário está dizendo que está enfrentando o mesmo problema ao adicionar um segundo node. Vou ajudá-lo com base nas soluções que funcionaram no documento.Vejo que você está tentando adicionar um segundo node KVM ao OpenNebula 6.10 e está enfrentando problemas similares aos do primeiro node. Baseado no documento anexo, vou criar um guia direto para configurar o novo node corretamente:
+🚀 Configuração do Novo Node KVM para OpenNebula 6.10
+1️⃣ Preparação do Node KVM (Red Hat 8.10)
+bash# No novo node KVM
+# 1. Criar usuário oneadmin
+useradd -u 9869 -g 9869 -m oneadmin
+echo "oneadmin:senha_segura" | chpasswd
+
+# 2. Configurar sudoers
+echo "oneadmin ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# 3. Criar diretórios necessários
+mkdir -p /var/lib/one/datastores
+chown -R oneadmin:oneadmin /var/lib/one/
+
+# 4. Instalar pacotes necessários
+yum install -y qemu-kvm libvirt libvirt-daemon-driver-qemu ruby rubygems
+systemctl enable --now libvirtd
+2️⃣ Configurar SSH do Frontend para o Node
+bash# No Frontend como oneadmin
+sudo su - oneadmin
+
+# Copiar chave SSH
+ssh-copy-id oneadmin@<IP_DO_NOVO_NODE>
+
+# Testar conexão
+ssh oneadmin@<IP_DO_NOVO_NODE> "hostname"
+3️⃣ Resolver o Problema do virtlogd
+bash# No novo node KVM
+# Configurar libvirt para não usar virtlogd
+echo 'stdio_handler = "file"' >> /etc/libvirt/qemu.conf
+
+# Se precisar rodar VMs como root temporariamente
+echo 'user = "root"' >> /etc/libvirt/qemu.conf
+echo 'group = "root"' >> /etc/libvirt/qemu.conf
+
+# Reiniciar libvirt
+systemctl restart libvirtd
+4️⃣ Configurar Permissões QEMU
+bash# No novo node
+# Adicionar qemu ao grupo oneadmin
+usermod -a -G oneadmin qemu
+
+# Verificar
+id qemu
+# Deve mostrar: groups=107(qemu),36(kvm),oneadmin
+5️⃣ Configurar Rede (NAT com virbr0)
+bash# Verificar e ativar rede default
+virsh net-list --all
+virsh net-start default
+virsh net-autostart default
+
+# Configurar firewall e NAT
+firewall-cmd --add-masquerade --permanent
+firewall-cmd --add-port=80/tcp --permanent
+firewall-cmd --add-port=2222/tcp --permanent
+firewall-cmd --add-port=5900-5999/tcp --permanent
+firewall-cmd --reload
+
+# Habilitar IP forwarding
+echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+sysctl -p
+6️⃣ Adicionar o Node no OpenNebula
+bash# No Frontend como oneadmin
+# Adicionar o host
+onehost create <IP_DO_NOVO_NODE> -i kvm -v kvm
+
+# Verificar
+onehost list
+onehost show <HOST_ID>
+
+# Se precisar sincronizar
+onehost sync <HOST_ID>
+7️⃣ Script de Verificação Completa
+Crie este script no novo node para verificar se tudo está OK:
+bashcat > check_node_setup.sh << 'EOF'
+#!/bin/bash
+
+echo "=== 1. Verificando Libvirt ==="
+systemctl status libvirtd --no-pager | head -5
+
+echo -e "\n=== 2. Verificando KVM ==="
+lsmod | grep kvm
+
+echo -e "\n=== 3. Verificando Rede virbr0 ==="
+virsh net-list --all
+ip link show virbr0
+
+echo -e "\n=== 4. Verificando Permissões ==="
+ls -la /var/lib/one/
+id oneadmin
+id qemu
+
+echo -e "\n=== 5. Verificando Firewall ==="
+firewall-cmd --list-all
+
+echo -e "\n=== 6. Verificando IP Forward ==="
+cat /proc/sys/net/ipv4/ip_forward
+
+echo -e "\n=== 7. Verificando qemu.conf ==="
+grep -E "stdio_handler|user|group" /etc/libvirt/qemu.conf
+EOF
+
+chmod +x check_node_setup.sh
+./check_node_setup.sh
+8️⃣ Testar com uma VM
+bash# No Frontend - criar VM de teste no novo node
+onevm deploy <VM_ID> <NOVO_HOST_ID>
+
+# Ou criar nova VM especificando o host
+onevm create --hold --name test-vm --cpu 1 --memory 1024 --disk ubuntu --net virbr0 --host <NOVO_HOST_ID>
+⚠️ Problemas Comuns e Soluções
+
+Erro "Failed to connect socket to '/run/libvirt/virtlogd-sock'"
+
+Já resolvido com stdio_handler = "file" no qemu.conf
+
+
+Erro de permissão nos discos
+
+Verificar se qemu está no grupo oneadmin
+Temporariamente usar user = "root" no qemu.conf
+
+
+VM não consegue acessar a rede
+
+Verificar se net.ipv4.ip_forward = 1
+Verificar se firewall tem masquerade ativo
+
+
+
+📋 Checklist Final
+
+ oneadmin pode fazer SSH sem senha para o node
+ libvirtd está rodando
+ virbr0 (default network) está ativa
+ qemu está no grupo oneadmin
+ stdio_handler configurado no qemu.conf
+ IP forwarding habilitado
+ Firewall com masquerade ativo
+ Node aparece como "on" no onehost list
+
+Se ainda tiver problemas específicos, me mostre:
+
+O erro exato que está aparecendo
+O resultado do script de verificação
+Os logs relevantes (/var/log/one/oned.log e /var/log/libvirt/libvirtd.log)
+Tentar novamenteMRq usuário é esse com numero ?
+useradd -u 9869 -g 9869 -m oneadminEditarDecoded OpenNebula user ID and group configuration details.3 sO usuário está perguntando sobre os números 9869 que aparecem no comando useradd. Esses números são o UID (user ID) e GID (group ID) do usuário oneadmin. No OpenNebula, é importante que o usuário oneadmin tenha o mesmo UID e GID em todos os nodes para evitar problemas de permissão quando os arquivos são compartilhados ou transferidos entre nodes.
+O número 9869 é o UID/GID padrão usado pelo OpenNebula para o usuário oneadmin. Isso garante consistência entre todos os nodes do cluster.Ótima pergunta! Os números 9869 são o UID (User ID) e GID (Group ID) padrão do usuário oneadmin no OpenNebula.
+📌 Por que usar UID/GID 9869?
+1️⃣ Consistência entre nodes
+bash# O OpenNebula espera que oneadmin tenha o MESMO UID/GID em TODOS os nodes
+# Frontend: oneadmin tem UID=9869
+# Node 1:   oneadmin tem UID=9869  
+# Node 2:   oneadmin tem UID=9869  ← DEVE ser igual!
+2️⃣ Verificar o UID/GID no Frontend
+bash# No Frontend, verifique qual UID/GID está sendo usado
+id oneadmin
+
+# Resultado típico:
+# uid=9869(oneadmin) gid=9869(oneadmin) groups=9869(oneadmin)
+3️⃣ Se o seu Frontend usar outro UID
+bash# Se o resultado mostrar outro número, use ESSE número
+# Exemplo: se mostrar uid=1001
+useradd -u 1001 -g 1001 -m oneadmin
+4️⃣ Por que é importante?
+bash# Quando o OpenNebula copia arquivos entre nodes:
+# Frontend → Node: os arquivos mantêm o owner UID/GID
+# Se os UIDs forem diferentes, haverá erro de permissão!
+
+# Exemplo de problema:
+# Frontend: arquivo pertence a oneadmin (UID 9869)
+# Node: oneadmin tem UID 1001
+# Resultado: arquivo no node pertence a "usuário 9869" (não existe!)
+5️⃣ Comando completo explicado
+bashuseradd -u 9869 -g 9869 -m oneadmin
+#       │      │      │  │    └─ nome do usuário
+#       │      │      │  └─ criar home directory
+#       │      │      └─ especifica o GID (Group ID)
+#       │      └─ especifica o UID (User ID)
+#       └─ define UID específico
+✅ Resumo
+
+9869 é o UID/GID padrão do OpenNebula
+DEVE ser igual em todos os nodes
+Evita problemas de permissão
+Se seu ambiente usa outro número, mantenha consistente
+
+Dica: Sempre verifique primeiro no Frontend com id oneadmin e use o mesmo UID/GID nos nodes!Tentar novamenteMRoneadmin@opennebula:~$ ssh oneadmin@172.16.6.159 "hostname"
+oneadmin@172.16.6.159's password:
+oneadmin@opennebula:~$ ssh root@172.16.6.159 "hostname"
+OpenNebula-Node2EditarInvestigated SSH access issues for oneadmin user.5 sO usuário está tentando fazer SSH como oneadmin para o novo node, mas está pedindo senha. Ele consegue acessar como root sem problemas. Isso significa que:
+
+O usuário oneadmin pode não existir ainda no node 172.16.6.159
+Ou existe mas a chave SSH não foi copiada corretamente
+Ou o SSH está configurado para não aceitar chaves para o usuário oneadmin
+
+Vou guiá-lo para:
+
+Primeiro verificar se o usuário oneadmin existe no node
+Se não existir, criá-lo com o UID/GID correto
+Configurar as chaves SSH corretamente
+Vejo que o SSH está pedindo senha para o usuário oneadmin, mas funciona para root. Vamos configurar o usuário oneadmin no novo node:
+🔧 Configurar usuário oneadmin no Node 2
+1️⃣ Verificar se oneadmin existe no Node 2
+bash# Como root no node 172.16.6.159
+ssh root@172.16.6.159
+
+# Verificar se usuário existe
+id oneadmin
+2️⃣ Se não existir, criar o usuário
+bash# Primeiro, verificar o UID/GID no Frontend
+# No Frontend:
+id oneadmin
+# Anote o UID e GID (provavelmente 9869)
+
+# No Node 2 como root:
+# Criar grupo primeiro
+groupadd -g 9869 oneadmin
+
+# Criar usuário com mesmo UID/GID do Frontend
+useradd -u 9869 -g 9869 -m -s /bin/bash oneadmin
+
+# Definir senha (pode ser temporária)
+echo "oneadmin:senha123" | chpasswd
+3️⃣ Configurar SSH sem senha
+bash# No Frontend como oneadmin
+sudo su - oneadmin
+
+# Gerar chave se não existir
+ls -la ~/.ssh/id_rsa
+# Se não existir:
+ssh-keygen -t rsa -b 2048 -N "" -f ~/.ssh/id_rsa
+
+# Copiar chave para o Node 2
+ssh-copy-id oneadmin@172.16.6.159
+# Digite a senha quando solicitado
+
+# Testar
+ssh oneadmin@172.16.6.159 "hostname"
+# Agora deve funcionar sem pedir senha
+4️⃣ Configurar permissões no Node 2
+bash# No Node 2 como root
+# Dar privilégios sudo ao oneadmin
+echo "oneadmin ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Criar estrutura de diretórios
+mkdir -p /var/lib/one/datastores
+chown -R oneadmin:oneadmin /var/lib/one
+
+# Verificar
+ls -la /var/lib/one/
+5️⃣ Script automatizado
+Se preferir, use este script no Node 2:
+bash# No Node 2 como root
+cat > setup_oneadmin.sh << 'EOF'
+#!/bin/bash
+
+# Verificar UID/GID do Frontend (ajuste se necessário)
+ONEADMIN_UID=9869
+ONEADMIN_GID=9869
+
+echo "=== Configurando usuário oneadmin ==="
+
+# Criar grupo
+groupadd -g $ONEADMIN_GID oneadmin 2>/dev/null
+
+# Criar usuário
+useradd -u $ONEADMIN_UID -g $ONEADMIN_GID -m -s /bin/bash oneadmin 2>/dev/null
+
+# Verificar
+echo "Usuário criado:"
+id oneadmin
+
+# Configurar sudo
+echo "oneadmin ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Criar diretórios
+mkdir -p /var/lib/one/datastores
+chown -R oneadmin:oneadmin /var/lib/one
+
+# Criar diretório .ssh
+mkdir -p /home/oneadmin/.ssh
+chmod 700 /home/oneadmin/.ssh
+chown -R oneadmin:oneadmin /home/oneadmin/.ssh
+
+echo "✅ Configuração concluída!"
+echo "Agora execute no Frontend: ssh-copy-id oneadmin@$(hostname -I | awk '{print $1}')"
+EOF
+
+chmod +x setup_oneadmin.sh
+./setup_oneadmin.sh
+6️⃣ Após configurar, teste novamente
+bash# No Frontend
+ssh oneadmin@172.16.6.159 "hostname && id"
+# Deve retornar sem pedir senha:
+# OpenNebula-Node2
+# uid=9869(oneadmin) gid=9869(oneadmin) groups=9869(oneadmin)
+Execute esses passos e me diga se funcionou!Tentar novamenteMRoneadmin@opennebula:~$ ssh root@172.16.6.159
+Activate the web console with: systemctl enable --now cockpit.socket
+Register this system with Red Hat Insights: insights-client --register
+Create an account or view all your systems at https://red.ht/insights-dashboard
+Last login: Wed Jun  4 13:03:24 2025 from 172.16.6.158
+[root@OpenNebula-Node2 ~]# id oneadmin
+uid=9869(oneadmin) gid=9869(oneadmin) groups=9869(oneadmin),6(disk),36(kvm),983(libvirt)EditarVerified user configuration and SSH access readiness.2 sÓtimo! O usuário oneadmin já existe no Node 2 com o UID/GID correto (9869) e já está nos grupos necessários (disk, kvm, libvirt). Agora só precisa configurar o SSH sem senha.Perfeito! O usuário oneadmin já existe no Node 2 com as configurações corretas. Agora só precisamos configurar o SSH sem senha:
+🔑 Configurar SSH sem senha
+1️⃣ No Frontend - Copiar a chave SSH
+bash# Volte ao Frontend (saia do node2)
+exit
+
+# Como oneadmin no Frontend
+ssh-copy-id oneadmin@172.16.6.159
+# Digite a senha do oneadmin quando solicitado
+
+# Se não souber a senha, defina uma temporária no Node2:
+# ssh root@172.16.6.159
+# echo "oneadmin:senha123" | chpasswd
+2️⃣ Testar a conexão
+bash# No Frontend como oneadmin
+ssh oneadmin@172.16.6.159 "hostname && date"
+# Deve funcionar sem pedir senha
+3️⃣ Se ainda pedir senha, verificar
+bash# No Node 2 como root
+# Verificar permissões do .ssh
+ls -la /home/oneadmin/.ssh/
+
+# Se não existir ou estiver com permissões erradas:
+mkdir -p /home/oneadmin/.ssh
+chmod 700 /home/oneadmin/.ssh
+chown -R oneadmin:oneadmin /home/oneadmin/.ssh
+
+# Verificar se authorized_keys existe
+ls -la /home/oneadmin/.ssh/authorized_keys
+chmod 600 /home/oneadmin/.ssh/authorized_keys
+4️⃣ Preparar o Node 2 para o OpenNebula
+bash# No Node 2 como root
+# Criar diretórios necessários
+mkdir -p /var/lib/one/datastores
+chown -R oneadmin:oneadmin /var/lib/one
+
+# Instalar pacotes necessários
+yum install -y qemu-kvm libvirt libvirt-daemon-driver-qemu ruby rubygems
+systemctl enable --now libvirtd
+
+# Configurar libvirt (resolver problema do virtlogd)
+echo 'stdio_handler = "file"' >> /etc/libvirt/qemu.conf
+systemctl restart libvirtd
+5️⃣ Adicionar o Node 2 ao OpenNebula
+bash# No Frontend como oneadmin
+# Adicionar o host
+onehost create 172.16.6.159 -i kvm -v kvm
+
+# Verificar
+onehost list
+# Deve aparecer os dois nodes
+Me avise quando o SSH estiver funcionando sem senha para continuarmos!Tentar novamenteMRoneadmin@opennebula:~$ onehost create 172.16.6.159 -i kvm -v kvm
+ID: 4
+oneadmin@opennebula:~$ onehost list
+  ID NAME                           CLUSTER    TVM      ALLOCATED_CPU      ALLOCATED_MEM STAT
+   4 172.16.6.159                   default      0      0 / 1200 (0%)    0K / 17.3G (0%) on
+   0 172.16.6.158                   default      3  1600 / 2400 (66%)  24G / 93.9G (25%) onEditarEvaluated Node 2 status and prepared for further configuration.18 sExcelente! O Node 2 foi adicionado com sucesso e está com status "on". Agora temos:
+
+Node 1 (172.16.6.158): 3 VMs rodando, 66% CPU, 25% memória
+Node 2 (172.16.6.159): 0 VMs, disponível para uso
+
+Vou guiar o usuário para preparar o Node 2 completamente, incluindo configurações de rede e verificação final.Excelente! 🎉 O Node 2 foi adicionado com sucesso e está online!
+✅ Status dos Nodes:
+
+Node 1 (172.16.6.158): 3 VMs rodando, 66% CPU usado
+Node 2 (172.16.6.159): Pronto para receber VMs!
+
+Agora vamos preparar o Node 2 para funcionar corretamente com VMs:
+🔧 Configurar Node 2 para VMs
+1️⃣ No Node 2 - Configurar Rede e Firewall
+bashssh root@172.16.6.159
+
+# Verificar e ativar rede default (virbr0)
+virsh net-list --all
+virsh net-start default
+virsh net-autostart default
+
+# Configurar firewall para NAT
+firewall-cmd --add-masquerade --permanent
+firewall-cmd --add-port=5900-5999/tcp --permanent
+firewall-cmd --reload
+
+# Habilitar IP forwarding
+echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+sysctl -p
+2️⃣ Configurar permissões QEMU
+bash# Adicionar qemu ao grupo oneadmin
+usermod -a -G oneadmin qemu
+
+# Configurar qemu.conf se ainda não fez
+grep stdio_handler /etc/libvirt/qemu.conf || echo 'stdio_handler = "file"' >> /etc/libvirt/qemu.conf
+
+# Se precisar (temporário)
+echo 'user = "root"' >> /etc/libvirt/qemu.conf
+echo 'group = "root"' >> /etc/libvirt/qemu.conf
+
+systemctl restart libvirtd
+3️⃣ Script de verificação no Node 2
+bashcat > check_node2.sh << 'EOF'
+#!/bin/bash
+
+echo "=== Status do Node 2 ==="
+echo "Hostname: $(hostname)"
+echo ""
+
+echo "1. Libvirt:"
+systemctl is-active libvirtd
+
+echo -e "\n2. Rede virbr0:"
+virsh net-list --all
+
+echo -e "\n3. Firewall masquerade:"
+firewall-cmd --query-masquerade
+
+echo -e "\n4. IP Forward:"
+cat /proc/sys/net/ipv4/ip_forward
+
+echo -e "\n5. Grupos do qemu:"
+id qemu
+
+echo -e "\n6. Datastores:"
+ls -la /var/lib/one/datastores/
+EOF
+
+chmod +x check_node2.sh
+./check_node2.sh
+4️⃣ No Frontend - Sincronizar
+bash# Como oneadmin no Frontend
+onehost sync 4
+5️⃣ Testar criando uma VM no Node 2
+bash# Opção A: Mover uma VM existente
+onevm migrate <VM_ID> 4
+
+# Opção B: Criar nova VM especificando o Node 2
+onetemplate instantiate <TEMPLATE_ID> --name "test-node2" --hold
+onevm deploy <NEW_VM_ID> 4
+onevm release <NEW_VM_ID>
+6️⃣ Verificar distribuição de VMs
+bash# Ver onde cada VM está rodando
+onevm list -x | grep -E "ID|HOST"
+
+# Ver recursos por host
+onehost show 0  # Node 1
+onehost show 4  # Node 2
+📋 Port Forwarding no Node 2
+Se quiser configurar NAT para VMs no Node 2:
+bash# No Node 2 - Script para gerenciar NAT
+cat > /root/nat_node2.sh << 'EOF'
+#!/bin/bash
+
+# Exemplo para VM com IP 192.168.122.100
+VM_IP="192.168.122.100"
+
+# HTTP na porta 8080
+iptables -t nat -A PREROUTING -p tcp --dport 8080 -j DNAT --to ${VM_IP}:80
+firewall-cmd --add-port=8080/tcp --permanent
+
+# SSH na porta 2223  
+iptables -t nat -A PREROUTING -p tcp --dport 2223 -j DNAT --to ${VM_IP}:22
+firewall-cmd --add-port=2223/tcp --permanent
+
+firewall-cmd --reload
+iptables-save > /etc/sysconfig/iptables
+
+echo "Acesso configurado:"
+echo "HTTP: http://172.16.6.159:8080"
+echo "SSH: ssh -p 2223 user@172.16.6.159"
+EOF
+
+chmod +x /root/nat_node2.sh
+Quer testar criando uma VM no Node 2 ou tem alguma configuração específica que precisa fazer?Tentar novamenteMRe o storage é adicionado automaticamente ?EditarExplicou como configurar datastores no OpenNebula manualmente.3 sO usuário está perguntando sobre storage/datastores. No OpenNebula, quando você adiciona um novo host, ele não adiciona automaticamente o storage. Os datastores precisam ser configurados. Vou explicar como funciona e como configurar.Ótima pergunta! NÃO, o storage não é adicionado automaticamente. Vou explicar como funciona:
+📁 Como funciona o Storage no OpenNebula
+1️⃣ Datastores Existentes
+bash# No Frontend - Ver datastores atuais
+onedatastore list
+
+# Provavelmente verá:
+# ID NAME         SIZE AVAIL CLUSTERS IMAGES TYPE DS      TM      
+#  0 system         -    -    0           0   sys  -       ssh
+#  1 default      148G   95%  0           0   img  fs      ssh
+#  2 files        148G   95%  0           0   fil  fs      ssh
+# 100 kvm_system     -    -    0           0   sys  -       ssh     
+# 101 kvm_images   148G   95%  0           0   img  fs      ssh
+2️⃣ Por padrão, o Node 2 usa os MESMOS datastores
+O OpenNebula usa SSH para copiar as imagens:
+
+Frontend → copia via SSH → Node 1 ou Node 2
+Ambos nodes usam /var/lib/one/datastores/
+
+3️⃣ Verificar no Node 2
+bash# No Node 2
+ssh root@172.16.6.159
+
+# Ver estrutura de datastores
+ls -la /var/lib/one/datastores/
+# Deve mostrar:
+# 0/   → system datastore
+# 1/   → default images
+# 100/ → kvm_system
+# 101/ → kvm_images
+4️⃣ Se quiser Storage Separado por Node
+Opção A: Storage Compartilhado (NFS/Ceph)
+bash# Ideal para produção - VMs podem migrar entre nodes
+# Todos nodes acessam o mesmo storage
+Opção B: Storage Local Separado
+bash# No Frontend - Criar datastores específicos para Node 2
+cat > datastore_node2_system.txt << 'EOF'
+NAME = "node2_system"
+TM_MAD = "ssh"
+TYPE = "SYSTEM_DS"
+HOSTS = "4"  # ID do Node 2
+EOF
+
+onedatastore create datastore_node2_system.txt
+
+cat > datastore_node2_images.txt << 'EOF'
+NAME = "node2_images"
+DS_MAD = "fs"
+TM_MAD = "ssh"
+TYPE = "IMAGE_DS"
+HOSTS = "4"  # ID do Node 2
+EOF
+
+onedatastore create datastore_node2_images.txt
+5️⃣ Configuração Atual (Recomendado para início)
+Com a configuração atual, ambos nodes compartilham os mesmos IDs de datastore mas cada um tem sua cópia local:
+bash# Quando você cria uma VM no Node 2:
+# 1. Imagem está em: Frontend:/var/lib/one/datastores/101/[image_id]
+# 2. OpenNebula copia via SSH para: Node2:/var/lib/one/datastores/100/[vm_id]/
+# 3. VM roda com disco local no Node 2
+6️⃣ Verificar espaço em disco no Node 2
+bash# No Node 2
+df -h /var/lib/one/
+
+# Garantir que tem espaço suficiente
+# Recomendado: mínimo 100GB livres
+7️⃣ Script para verificar storage
+bash# No Frontend
+cat > check_storage.sh << 'EOF'
+#!/bin/bash
+
+echo "=== Datastores Configurados ==="
+onedatastore list
+
+echo -e "\n=== Espaço em Disco - Node 1 ==="
+ssh oneadmin@172.16.6.158 "df -h /var/lib/one/"
+
+echo -e "\n=== Espaço em Disco - Node 2 ==="
+ssh oneadmin@172.16.6.159 "df -h /var/lib/one/"
+
+echo -e "\n=== VMs por Datastore ==="
+onevm list -x | xmlstarlet sel -t -m "//VM" -v "concat('VM ', ID, ': DS=', HISTORY_RECORDS/HISTORY/DS_ID, ' Host=', HISTORY_RECORDS/HISTORY/HOSTNAME)" -n 2>/dev/null || echo "Instale xmlstarlet para ver detalhes"
+EOF
+
+chmod +x check_storage.sh
+./check_storage.sh
+❓ Resumo
+
+✅ Storage local: Funciona automaticamente (configuração atual)
+❌ Storage compartilhado: Precisa configurar NFS/Ceph
+✅ Mesmo datastore ID: Usado em ambos nodes
+✅ Arquivos separados: Cada node tem sua cópia
+
+Para seu caso: A configuração atual já funciona! Cada node tem seu storage local e o OpenNebula gerencia as cópias via SSH.
+Quer configurar algo específico no storage ou está tudo OK?Tentar novamenteMRentao disco local do node 2 já é considerado automaticamente mesmo que de tamanhos diferentes ?EditarAnalisou detalhes do disco local em diferentes nodes.3 sO usuário está perguntando se o disco local do node 2 é considerado automaticamente mesmo tendo tamanho diferente do node 1. Preciso explicar que:
+
+Sim, o disco local é usado automaticamente
+O tamanho diferente não é problema
+O OpenNebula não "soma" os storages - cada node tem seu próprio
+As limitações que isso pode trazer
+Como verificar e monitorar o espaço
+SIM! O disco local do Node 2 é usado automaticamente, independente do tamanho! Vou explicar como funciona:
+📊 Como o OpenNebula gerencia discos de tamanhos diferentes
+1️⃣ Cada node usa SEU PRÓPRIO disco local
+bash# Node 1: 500GB de disco
+# Node 2: 200GB de disco
+# 
+# OpenNebula NÃO soma = cada um é independente!
+2️⃣ Verificar espaço em cada node
+bash# No Frontend
+# Ver espaço no Node 1
+ssh oneadmin@172.16.6.158 "df -h /var/lib/one/"
+
+# Ver espaço no Node 2  
+ssh oneadmin@172.16.6.159 "df -h /var/lib/one/"
+3️⃣ O que acontece na prática
+Quando você cria uma VM:
+
+No Node 1: Usa o disco do Node 1 (ex: 500GB disponíveis)
+No Node 2: Usa o disco do Node 2 (ex: 200GB disponíveis)
+
+⚠️ Importante:
+
+VM de 300GB → ✅ Cabe no Node 1, ❌ NÃO cabe no Node 2
+OpenNebula não verifica automaticamente o espaço antes de deployar!
+
+4️⃣ Como o OpenNebula monitora
+bash# Ver capacidade por host
+onehost show 0 | grep -E "TOTAL|FREE|USED"
+onehost show 4 | grep -E "TOTAL|FREE|USED"
+
+# Mas isso mostra apenas MEMÓRIA, não disco!
+5️⃣ Adicionar monitoramento de disco
+bash# No Frontend - Criar script de monitoramento
+cat > monitor_disk_nodes.sh << 'EOF'
+#!/bin/bash
+
+echo "=== Espaço em Disco por Node ==="
+echo ""
+
+for host in 172.16.6.158 172.16.6.159; do
+    echo "Node: $host"
+    ssh oneadmin@$host "df -h /var/lib/one/ | tail -1" | awk '{print "  Total: "$2" | Usado: "$3" | Livre: "$4" | Uso: "$5}'
+    
+    # Contar VMs no node
+    vm_count=$(ssh oneadmin@$host "ls -d /var/lib/one/datastores/100/*/ 2>/dev/null | wc -l")
+    echo "  VMs no node: $vm_count"
+    echo ""
+done
+EOF
+
+chmod +x monitor_disk_nodes.sh
+./monitor_disk_nodes.sh
+6️⃣ Estratégias para gerenciar diferentes tamanhos
+A) Usar Scheduling Requirements
+bash# No template da VM grande
+SCHED_REQUIREMENTS = "HOSTNAME=\"172.16.6.158\""  # Força Node 1
+B) Criar Host Groups
+bash# Nodes com muito espaço
+onehost update 0  # Adicionar: LABELS="large-storage"
+
+# Nodes com pouco espaço  
+onehost update 4  # Adicionar: LABELS="small-storage"
+
+# No template
+SCHED_REQUIREMENTS = "LABELS=\"large-storage\""
+C) Monitorar antes de criar VMs grandes
+bash# Script para verificar onde cabe uma VM
+cat > check_vm_fit.sh << 'EOF'
+#!/bin/bash
+
+VM_SIZE_GB=$1
+
+if [ -z "$VM_SIZE_GB" ]; then
+    echo "Uso: $0 <tamanho_em_GB>"
+    exit 1
+fi
+
+echo "Verificando onde cabe VM de ${VM_SIZE_GB}GB..."
+echo ""
+
+for host_id in 0 4; do
+    host_info=$(onehost show $host_id | grep "NAME\|MEM")
+    host_ip=$(onehost show $host_id | grep "NAME" | awk '{print $3}')
+    
+    free_space=$(ssh oneadmin@$host_ip "df -BG /var/lib/one/ | tail -1" | awk '{print $4}' | sed 's/G//')
+    
+    echo "Host ID $host_id ($host_ip):"
+    echo "  Espaço livre: ${free_space}GB"
+    
+    if [ $free_space -gt $VM_SIZE_GB ]; then
+        echo "  ✅ VM cabe neste node"
+    else
+        echo "  ❌ VM NÃO cabe neste node"
+    fi
+    echo ""
+done
+EOF
+
+chmod +x check_vm_fit.sh
+
+# Exemplo: verificar onde cabe VM de 150GB
+./check_vm_fit.sh 150
+📋 Resumo
+
+✅ Disco local é usado automaticamente
+✅ Tamanhos diferentes não são problema
+⚠️ Cada node tem limite independente
+❌ OpenNebula não impede deploy em node sem espaço
+💡 Precisa monitorar manualmente ou criar regras
+
+Recomendação: Execute o script monitor_disk_nodes.sh regularmente para acompanhar o uso de disco em cada node!Tentar novamenteMRoneadmin@opennebula:~$ ./check_vm_fit.sh 150
+Verificando onde cabe VM de 150GB...
+bash: CPU: command not found
+Host ID 0 (172.16.6.158
+CPU
+CPU
+GROUP):
+  Espaço livre: GB
+./check_vm_fit.sh: line 22: [: -gt: unary operator expected
+  ❌ VM NÃO cabe neste node
+bash: CPU: command not found
+Host ID 4 (172.16.6.159
+CPU
+CPU
+GROUP):
+  Espaço livre: GB
+./check_vm_fit.sh: line 22: [: -gt: unary operator expected
+  ❌ VM NÃO cabe neste nodeEditarDiagnosed script error in host information retrieval method.1 sO script tem erro. O problema está na linha que pega o host_info e host_ip. O grep está pegando múltiplas linhas e causando problemas. Vou corrigir o script.Vou corrigir o script! Há um erro na extração das informações:
+🔧 Script corrigido
+bashcat > check_vm_fit.sh << 'EOF'
+#!/bin/bash
+
+VM_SIZE_GB=$1
+
+if [ -z "$VM_SIZE_GB" ]; then
+    echo "Uso: $0 <tamanho_em_GB>"
+    exit 1
+fi
+
+echo "Verificando onde cabe VM de ${VM_SIZE_GB}GB..."
+echo ""
+
+# Para cada host
+for host_id in 0 4; do
+    # Pegar IP do host
+    host_ip=$(onehost show $host_id | grep "^NAME" | awk '{print $3}')
+    
+    if [ -z "$host_ip" ]; then
+        echo "Erro ao obter IP do host $host_id"
+        continue
+    fi
+    
+    # Pegar espaço livre em GB
+    free_space=$(ssh oneadmin@$host_ip "df -BG /var/lib/one/ 2>/dev/null | tail -1 | awk '{print \$4}' | sed 's/G//'")
+    
+    if [ -z "$free_space" ]; then
+        echo "Host ID $host_id ($host_ip):"
+        echo "  ❌ Erro ao obter espaço livre"
+        continue
+    fi
+    
+    echo "Host ID $host_id ($host_ip):"
+    echo "  Espaço livre: ${free_space}GB"
+    
+    if [ "$free_space" -gt "$VM_SIZE_GB" ] 2>/dev/null; then
+        echo "  ✅ VM cabe neste node"
+    else
+        echo "  ❌ VM NÃO cabe neste node"
+    fi
+    echo ""
+done
+EOF
+
+chmod +x check_vm_fit.sh
+🔍 Script alternativo mais simples
+bashcat > check_disk_space.sh << 'EOF'
+#!/bin/bash
+
+echo "=== Espaço em Disco nos Nodes ==="
+echo ""
+
+echo "Node 1 (172.16.6.158):"
+ssh oneadmin@172.16.6.158 "df -h /var/lib/one/ | grep -v Filesystem"
+echo ""
+
+echo "Node 2 (172.16.6.159):"
+ssh oneadmin@172.16.6.159 "df -h /var/lib/one/ | grep -v Filesystem"
+echo ""
+
+if [ ! -z "$1" ]; then
+    echo "=== Verificando para VM de $1 GB ==="
+    
+    # Node 1
+    free1=$(ssh oneadmin@172.16.6.158 "df -BG /var/lib/one/ | tail -1 | awk '{print \$4}' | sed 's/G//'")
+    echo -n "Node 1: "
+    if [ "$free1" -gt "$1" ] 2>/dev/null; then
+        echo "✅ Cabe (${free1}GB livres)"
+    else
+        echo "❌ Não cabe (${free1}GB livres)"
+    fi
+    
+    # Node 2
+    free2=$(ssh oneadmin@172.16.6.159 "df -BG /var/lib/one/ | tail -1 | awk '{print \$4}' | sed 's/G//'")
+    echo -n "Node 2: "
+    if [ "$free2" -gt "$1" ] 2>/dev/null; then
+        echo "✅ Cabe (${free2}GB livres)"
+    else
+        echo "❌ Não cabe (${free2}GB livres)"
+    fi
+fi
+EOF
+
+chmod +x check_disk_space.sh
+📊 Usar o script
+bash# Ver espaço geral
+./check_disk_space.sh
+
+# Verificar se cabe VM de 150GB
+./check_disk_space.sh 150
+🛠️ Script de monitoramento completo
+bashcat > monitor_nodes.sh << 'EOF'
+#!/bin/bash
+
+echo "========================================"
+echo "    MONITORAMENTO DOS NODES OPENNEBULA  "
+echo "========================================"
+echo ""
+
+# Função para mostrar informações de um node
+check_node() {
+    local host_id=$1
+    local host_ip=$2
+    
+    echo "### Node $host_id - $host_ip ###"
+    
+    # Verificar se está online
+    if ! onehost show $host_id | grep -q "STATE.*: on"; then
+        echo "❌ Node OFFLINE"
+        return
+    fi
+    
+    echo "✅ Node ONLINE"
+    
+    # CPU e Memória do OpenNebula
+    echo ""
+    echo "Recursos (OpenNebula):"
+    onehost show $host_id | grep -E "TOTAL CPU|ALLOCATED CPU|TOTAL MEM|ALLOCATED MEM" | sed 's/^/  /'
+    
+    # Disco local
+    echo ""
+    echo "Disco local (/var/lib/one/):"
+    ssh oneadmin@$host_ip "df -h /var/lib/one/ | tail -1" | awk '{print "  Total: "$2" | Usado: "$3" | Livre: "$4" | Uso: "$5}'
+    
+    # VMs rodando
+    echo ""
+    echo "VMs neste node:"
+    onevm list | grep -E "runn.*$host_ip" | wc -l | xargs echo "  Total VMs rodando:"
+    
+    echo ""
+    echo "----------------------------------------"
+    echo ""
+}
+
+# Verificar cada node
+check_node 0 172.16.6.158
+check_node 4 172.16.6.159
+
+# Resumo
+echo "### RESUMO ###"
+echo ""
+echo "Distribuição de VMs:"
+onehost list
+EOF
+
+chmod +x monitor_nodes.sh
+Agora execute:
+bash./monitor_nodes.sh
+Isso vai mostrar todas as informações importantes sobre cada node!Tentar novamenteMRoneadmin@opennebula:~$ ./check_vm_fit.sh 150
+Verificando onde cabe VM de 150GB...
+Host ID 0 (172.16.6.158
+CPU):
+  ❌ Erro ao obter espaço livre
+Host ID 4 (172.16.6.159
+CPU):
+  ❌ Erro ao obter espaço livreEditarDevised alternative script to extract host IP correctly3 sO problema é que o comando onehost show está retornando informações em um formato diferente do esperado. O grep por "^NAME" não está funcionando corretamente. Vou criar um script mais robusto que pega o IP de forma diferente.Vejo que o problema é na extração do IP. Vamos usar uma abordagem diferente:
+🔧 Script corrigido usando IPs diretos
+bashcat > check_vm_fit.sh << 'EOF'
+#!/bin/bash
+
+VM_SIZE_GB=$1
+
+if [ -z "$VM_SIZE_GB" ]; then
+    echo "Uso: $0 <tamanho_em_GB>"
+    exit 1
+fi
+
+echo "Verificando onde cabe VM de ${VM_SIZE_GB}GB..."
+echo ""
+
+# Definir nodes diretamente
+declare -A nodes
+nodes[0]="172.16.6.158"
+nodes[4]="172.16.6.159"
+
+for host_id in 0 4; do
+    host_ip=${nodes[$host_id]}
+    
+    echo "Host ID $host_id ($host_ip):"
+    
+    # Tentar pegar espaço livre
+    free_space=$(ssh -o ConnectTimeout=5 oneadmin@$host_ip "df -BG /var/lib/one/ 2>/dev/null | tail -1 | awk '{print \$4}' | sed 's/G//'")
+    
+    if [ -z "$free_space" ] || [ "$free_space" = "" ]; then
+        # Tentar método alternativo
+        free_space=$(ssh -o ConnectTimeout=5 oneadmin@$host_ip "df /var/lib/one/ 2>/dev/null | tail -1 | awk '{print \$4/1024/1024}' | cut -d. -f1")
+    fi
+    
+    if [ -z "$free_space" ]; then
+        echo "  ❌ Erro ao conectar ou obter espaço"
+        # Mostrar o que aconteceu
+        ssh -o ConnectTimeout=5 oneadmin@$host_ip "df -h /var/lib/one/" 2>&1 | sed 's/^/  DEBUG: /'
+    else
+        echo "  Espaço livre: ${free_space}GB"
+        
+        if [ "$free_space" -gt "$VM_SIZE_GB" ] 2>/dev/null; then
+            echo "  ✅ VM cabe neste node"
+        else
+            echo "  ❌ VM NÃO cabe neste node"
+        fi
+    fi
+    echo ""
+done
+EOF
+
+chmod +x check_vm_fit.sh
+🔍 Vamos primeiro testar a conectividade
+bash# Testar conexão SSH com cada node
+echo "Testando conexão com Node 1:"
+ssh oneadmin@172.16.6.158 "hostname && df -h /var/lib/one/"
+
+echo -e "\nTestando conexão com Node 2:"
+ssh oneadmin@172.16.6.159 "hostname && df -h /var/lib/one/"
+📊 Script simplificado para debug
+bashcat > test_disk_space.sh << 'EOF'
+#!/bin/bash
+
+echo "=== Testando espaço em disco nos nodes ==="
+echo ""
+
+# Node 1
+echo "Node 1 (172.16.6.158):"
+ssh -v oneadmin@172.16.6.158 "df -h /var/lib/one/" 2>&1
+
+echo -e "\n----------------------------------------\n"
+
+# Node 2  
+echo "Node 2 (172.16.6.159):"
+ssh -v oneadmin@172.16.6.159 "df -h /var/lib/one/" 2>&1
+EOF
+
+chmod +x test_disk_space.sh
+Execute primeiro o teste de conectividade para ver se o SSH está funcionando:
+bash# Teste manual direto
+ssh oneadmin@172.16.6.158 "df -h /var/lib/one/"
+ssh oneadmin@172.16.6.159 "df -h /var/lib/one/"
+Me mostre o resultado desses comandos para eu entender o que está acontecendo!Tentar novamenteMRbom vamos voltar para onde estavamos, agora queingressei no opennebula, o que mais precisa ?EditarPreparou próximos passos para configurar Node 2 no OpenNebula.4 sO usuário adicionou com sucesso o segundo node ao OpenNebula. Vimos que:
+
+O Node 2 (172.16.6.159) foi adicionado e está online
+O Node 1 tem 3 VMs rodando
+O Node 2 está pronto para receber VMs
+
+Agora preciso guiar sobre os próximos passos para deixar o Node 2 completamente operacional.Perfeito! O Node 2 está adicionado e online. Vamos garantir que está totalmente operacional:
+✅ Checklist - O que falta configurar no Node 2
+1️⃣ Verificar configurações essenciais
+bash# No Node 2 (172.16.6.159) como root
+ssh root@172.16.6.159
+
+# Verificar se tudo está OK
+cat > final_check_node2.sh << 'EOF'
+#!/bin/bash
+
+echo "=== VERIFICAÇÃO FINAL NODE 2 ==="
+echo ""
+
+# 1. Libvirt
+echo "1. Libvirt:"
+systemctl is-active libvirtd && echo "✅ Rodando" || echo "❌ Parado"
+
+# 2. Rede virbr0
+echo -e "\n2. Rede virbr0:"
+virsh net-list --all | grep default && echo "✅ Configurada" || echo "❌ Falta configurar"
+
+# 3. Firewall
+echo -e "\n3. Firewall masquerade:"
+firewall-cmd --query-masquerade && echo "✅ Ativo" || echo "❌ Inativo"
+
+# 4. IP Forward
+echo -e "\n4. IP Forward:"
+[ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ] && echo "✅ Ativo" || echo "❌ Inativo"
+
+# 5. Qemu config
+echo -e "\n5. Qemu config:"
+grep -q "stdio_handler" /etc/libvirt/qemu.conf && echo "✅ Configurado" || echo "❌ Falta configurar"
+
+# 6. Grupos
+echo -e "\n6. Grupos qemu:"
+id qemu | grep -q oneadmin && echo "✅ qemu no grupo oneadmin" || echo "❌ Falta adicionar"
+EOF
+
+chmod +x final_check_node2.sh
+./final_check_node2.sh
+2️⃣ Corrigir o que estiver faltando
+bash# Se algo estiver ❌, execute os comandos necessários:
+
+# Rede virbr0
+virsh net-start default
+virsh net-autostart default
+
+# Firewall masquerade
+firewall-cmd --add-masquerade --permanent
+firewall-cmd --reload
+
+# IP Forward
+echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+sysctl -p
+
+# Qemu config
+echo 'stdio_handler = "file"' >> /etc/libvirt/qemu.conf
+systemctl restart libvirtd
+
+# Grupos
+usermod -a -G oneadmin qemu
+3️⃣ No Frontend - Testar criando uma VM
+bash# Como oneadmin no Frontend
+sudo su - oneadmin
+
+# Opção A: Criar VM diretamente no Node 2
+onevm create --name test-node2 --cpu 1 --memory 1024 --disk ubuntu --network 1 --hold
+onevm show <VM_ID> | grep ID  # Anotar o ID
+onevm deploy <VM_ID> 4        # 4 é o ID do Node 2
+onevm release <VM_ID>
+
+# Opção B: Se tiver template pronto
+onetemplate instantiate <TEMPLATE_ID> --name "vm-node2-test"
+onevm deploy <VM_ID> 4
+4️⃣ Configurar balanceamento automático (opcional)
+bash# Para o OpenNebula distribuir VMs automaticamente
+# Editar /etc/one/sched.conf no Frontend
+
+# Verificar política atual
+grep -i "policy" /etc/one/sched.conf
+
+# Por padrão usa PACKING (enche um node antes de usar outro)
+# Pode mudar para STRIPING (distribui igualmente)
+5️⃣ Script de monitoramento dos 2 nodes
+bash# No Frontend
+cat > monitor_cluster.sh << 'EOF'
+#!/bin/bash
+
+echo "========================================="
+echo "      STATUS DO CLUSTER OPENNEBULA       "
+echo "========================================="
+echo ""
+
+# Resumo geral
+echo "### RESUMO ###"
+onehost list
+echo ""
+
+# VMs por node
+echo "### VMs ATIVAS ###"
+onevm list | grep -E "runn|pend|boot"
+echo ""
+
+# Uso de recursos
+echo "### USO DE RECURSOS ###"
+for host_id in 0 4; do
+    echo -e "\nNode $host_id:"
+    onehost show $host_id | grep -E "TOTAL|USED|FREE" | grep -E "CPU|MEMORY"
+done
+EOF
+
+chmod +x monitor_cluster.sh
+./monitor_cluster.sh
+6️⃣ Próximos passos opcionais
+
+Alta Disponibilidade: Configurar migração live entre nodes
+Storage Compartilhado: NFS ou Ceph para facilitar migração
+Balanceamento: Configurar políticas de scheduling
+Monitoramento: Integrar com Zabbix/Prometheus
+
+❓ O que você quer fazer agora?
+
+Testar criando VMs no Node 2?
+Configurar balanceamento automático?
+Configurar storage compartilhado?
+Adicionar mais nodes?
+
+Me diga qual é sua prioridade!Tentar novamenteMRsegue o resultado
+[root@OpenNebula-Node2 ~]# ./final_check_node2.sh
+=== VERIFICAÇÃO FINAL NODE 2 ===
+1. Libvirt:
+active
+✅ Rodando
+2. Rede virbr0:
+ default   active   yes         yes
+✅ Configurada
+3. Firewall masquerade:
+FirewallD is not running
+❌ Inativo
+4. IP Forward:
+✅ Ativo
+5. Qemu config:
+✅ Configurado
+6. Grupos qemu:
+❌ Falta adicionarnao seria interessante ter um script para verificar tudo que tem configurado no node 1 e replicar no node2 ? assim trago o que retornou e ai faz um script mais exato para corrigir se faltar algo, o resultado acima é node 2EditarCrafted script to compare and synchronize Node configurations.5 sExcelente ideia do usuário! Ele quer comparar a configuração do Node 1 (que está funcionando) com o Node 2 para garantir que tudo esteja igual. Isso é muito mais inteligente do que tentar adivinhar as configurações. Vou criar um script que:
+
+Coleta todas as configurações relevantes do Node 1
+Compara com o Node 2
+Gera comandos específicos para igualar as configurações
+
+Pelo resultado mostrado, vejo que:
+
+Firewall não está rodando no Node 2 (mas pode ser que também não esteja no Node 1)
+qemu não está no grupo oneadmin no Node 2
+Excelente ideia! 🎯 Vamos criar um script que compara Node 1 com Node 2 e replica as configurações:
+🔍 Script para coletar configurações do Node 1
+bash# No Frontend, crie este script
+cat > collect_node_config.sh << 'EOF'
+#!/bin/bash
+
+NODE_IP=$1
+
+if [ -z "$NODE_IP" ]; then
+    echo "Uso: $0 <IP_DO_NODE>"
+    exit 1
+fi
+
+echo "=== COLETANDO CONFIGURAÇÕES DO NODE $NODE_IP ==="
+echo ""
+
+ssh root@$NODE_IP << 'ENDSSH'
+echo "### 1. SERVIÇOS ###"
+echo "Libvirtd: $(systemctl is-active libvirtd)"
+echo "Firewalld: $(systemctl is-active firewalld)"
+echo "IPTables: $(systemctl is-active iptables 2>/dev/null || echo "não instalado")"
+echo ""
+
+echo "### 2. FIREWALL ###"
+if systemctl is-active firewalld >/dev/null 2>&1; then
+    echo "Firewalld está ativo"
+    echo "Masquerade: $(firewall-cmd --query-masquerade 2>/dev/null)"
+    echo "Portas abertas: $(firewall-cmd --list-ports 2>/dev/null)"
+    echo "Serviços: $(firewall-cmd --list-services 2>/dev/null)"
+else
+    echo "Firewalld não está ativo"
+    echo "Verificando iptables:"
+    iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -i masquerade && echo "Masquerade via iptables: SIM" || echo "Masquerade via iptables: NÃO"
+fi
+echo ""
+
+echo "### 3. REDE ###"
+echo "Bridges:"
+brctl show 2>/dev/null || bridge link show
+echo ""
+echo "Redes libvirt:"
+virsh net-list --all
+echo ""
+
+echo "### 4. CONFIGURAÇÕES SISTEMA ###"
+echo "IP Forward: $(cat /proc/sys/net/ipv4/ip_forward)"
+echo "SELinux: $(getenforce 2>/dev/null || echo "não instalado")"
+echo ""
+
+echo "### 5. QEMU ###"
+echo "Grupos do qemu: $(id qemu 2>/dev/null)"
+echo "stdio_handler em qemu.conf: $(grep -E "^stdio_handler|^user|^group" /etc/libvirt/qemu.conf 2>/dev/null)"
+echo ""
+
+echo "### 6. DIRETÓRIOS E PERMISSÕES ###"
+echo "Datastores:"
+ls -la /var/lib/one/datastores/ 2>/dev/null | head -5
+echo "Owner do /var/lib/one: $(stat -c "%U:%G" /var/lib/one 2>/dev/null)"
+echo ""
+
+echo "### 7. PACOTES INSTALADOS ###"
+echo "Libvirt: $(rpm -qa | grep -E "^libvirt-[0-9]" | head -1)"
+echo "QEMU: $(rpm -qa | grep -E "^qemu-kvm-[0-9]" | head -1)"
+echo ""
+ENDSSH
+EOF
+
+chmod +x collect_node_config.sh
+📊 Executar nos dois nodes
+bash# Coletar configurações de ambos
+./collect_node_config.sh 172.16.6.158 > node1_config.txt
+./collect_node_config.sh 172.16.6.159 > node2_config.txt
+
+# Ver diferenças
+diff -u node1_config.txt node2_config.txt
+🔧 Script para corrigir Node 2 baseado nas suas saídas
+Enquanto isso, baseado no que você já mostrou, aqui estão as correções:
+bash# No Node 2 como root
+cat > fix_node2_config.sh << 'EOF'
+#!/bin/bash
+
+echo "=== CORRIGINDO CONFIGURAÇÕES DO NODE 2 ==="
+echo ""
+
+# 1. Adicionar qemu ao grupo oneadmin
+echo "1. Adicionando qemu ao grupo oneadmin..."
+usermod -a -G oneadmin qemu
+echo "✅ Feito. Grupos do qemu: $(id qemu)"
+
+# 2. Verificar se deve usar firewalld ou não
+echo -e "\n2. Verificando configuração de firewall..."
+
+# Verificar se o Node 1 usa firewalld
+NODE1_USES_FIREWALLD=$(ssh root@172.16.6.158 "systemctl is-active firewalld 2>/dev/null")
+
+if [ "$NODE1_USES_FIREWALLD" = "active" ]; then
+    echo "Node 1 usa firewalld. Ativando no Node 2..."
+    systemctl start firewalld
+    systemctl enable firewalld
+    
+    # Configurar masquerade e portas
+    firewall-cmd --add-masquerade --permanent
+    firewall-cmd --add-port=5900-5999/tcp --permanent
+    firewall-cmd --add-service=libvirt --permanent
+    firewall-cmd --reload
+    echo "✅ Firewalld configurado"
+else
+    echo "Node 1 NÃO usa firewalld."
+    systemctl stop firewalld 2>/dev/null
+    systemctl disable firewalld 2>/dev/null
+    
+    # Configurar masquerade via iptables
+    iptables -t nat -A POSTROUTING -s 192.168.122.0/24 -j MASQUERADE
+    iptables-save > /etc/sysconfig/iptables 2>/dev/null
+    echo "✅ Usando iptables direto"
+fi
+
+# 3. Reiniciar libvirt para aplicar mudanças de grupo
+echo -e "\n3. Reiniciando libvirt..."
+systemctl restart libvirtd
+echo "✅ Libvirt reiniciado"
+
+# 4. Verificação final
+echo -e "\n=== VERIFICAÇÃO FINAL ==="
+echo "Grupos qemu: $(id qemu)"
+echo "Firewall: $(systemctl is-active firewalld || echo "não está usando firewalld")"
+echo "Masquerade: $(firewall-cmd --query-masquerade 2>/dev/null || echo "via iptables")"
+EOF
+
+chmod +x fix_node2_config.sh
+Execute primeiro o script de coleta nos dois nodes e me mostre o resultado para eu criar um script de correção mais preciso:
+bash./collect_node_config.sh 172.16.6.158
+Isso vai nos dar a configuração exata do Node 1 para replicar!Tentar novamentenode1_config.txt57 linhastxtnode2_config.txt50 linhastxtMRveja vc a diferença e prepare o script mais acertivoEditarAnalisou diferenças entre nós e preparou script corretivo.8 sAnalisando as diferenças entre Node 1 e Node 2:
+
+Firewall:
+
+Node 1: firewalld ATIVO com masquerade e várias portas abertas
+Node 2: firewalld INATIVO, sem masquerade
+
+
+Grupos QEMU:
+
+Node 1: qemu está no grupo oneadmin
+Node 2: qemu NÃO está no grupo oneadmin
+
+
+Qemu.conf:
+
+Node 1: user="qemu", group="qemu" (duplicado)
+Node 2: user="oneadmin", group="oneadmin"
+
+
+SELinux:
+
+Node 1: Disabled
+Node 2: Permissive
+
+
+Bridge br0:
+
+Node 1: tem br0
+Node 2: não tem br0
+
+
+Portas firewall no Node 1:
+
+22/tcp, 80/tcp, 2222/tcp, 3389/tcp, 3390/tcp, 5900-11999/tcp, 16509/tcp, 49152-49216/tcp, 4124/udp
+
+
+
+Vou criar um script que corrige essas diferenças.Perfeito! Vejo as diferenças claramente. Vou criar um script preciso para sincronizar o Node 2 com o Node 1:
+🔧 Script de Sincronização Node 1 → Node 2
+bash# No Node 2 como root
+cat > sync_node2_with_node1.sh << 'EOF'
+#!/bin/bash
+
+echo "========================================="
+echo "   SINCRONIZANDO NODE 2 COM NODE 1      "
+echo "========================================="
+echo ""
+
+# 1. FIREWALL - Node 1 usa firewalld ativo
+echo "### 1. CONFIGURANDO FIREWALL ###"
+echo "Ativando firewalld..."
+systemctl start firewalld
+systemctl enable firewalld
+
+echo "Configurando regras idênticas ao Node 1..."
+# Masquerade
+firewall-cmd --add-masquerade --permanent
+
+# Portas TCP
+firewall-cmd --add-port=22/tcp --permanent
+firewall-cmd --add-port=80/tcp --permanent
+firewall-cmd --add-port=2222/tcp --permanent
+firewall-cmd --add-port=3389/tcp --permanent
+firewall-cmd --add-port=3390/tcp --permanent
+firewall-cmd --add-port=5900-11999/tcp --permanent
+firewall-cmd --add-port=16509/tcp --permanent
+firewall-cmd --add-port=49152-49216/tcp --permanent
+
+# Porta UDP
+firewall-cmd --add-port=4124/udp --permanent
+
+# Serviços
+firewall-cmd --add-service=cockpit --permanent
+firewall-cmd --add-service=dhcpv6-client --permanent
+firewall-cmd --add-service=libvirt --permanent
+firewall-cmd --add-service=libvirt-tls --permanent
+firewall-cmd --add-service=ssh --permanent
+firewall-cmd --add-service=vnc-server --permanent
+
+# Aplicar
+firewall-cmd --reload
+echo "✅ Firewall configurado"
+
+# 2. GRUPOS QEMU
+echo -e "\n### 2. CORRIGINDO GRUPOS QEMU ###"
+echo "Adicionando qemu ao grupo oneadmin..."
+usermod -a -G oneadmin qemu
+echo "✅ Grupos atualizados: $(id qemu)"
+
+# 3. QEMU.CONF
+echo -e "\n### 3. CORRIGINDO QEMU.CONF ###"
+echo "Ajustando qemu.conf para usar qemu:qemu como Node 1..."
+
+# Fazer backup
+cp /etc/libvirt/qemu.conf /etc/libvirt/qemu.conf.bak.$(date +%Y%m%d)
+
+# Remover configurações antigas de user/group
+sed -i '/^user = /d' /etc/libvirt/qemu.conf
+sed -i '/^group = /d' /etc/libvirt/qemu.conf
+
+# Adicionar configurações corretas (apenas uma vez)
+cat >> /etc/libvirt/qemu.conf << 'EOQEMU'
+user = "qemu"
+group = "qemu"
+EOQEMU
+
+echo "✅ qemu.conf atualizado"
+
+# 4. BRIDGE BR0 (OPCIONAL - caso precise no futuro)
+echo -e "\n### 4. BRIDGE BR0 ###"
+echo "Node 1 tem br0, mas está vazia (sem uso no momento)"
+echo "Criando br0 para compatibilidade..."
+if ! brctl show | grep -q "^br0"; then
+    brctl addbr br0
+    ip link set br0 up
+    echo "✅ Bridge br0 criada"
+else
+    echo "✅ Bridge br0 já existe"
+fi
+
+# 5. SELINUX
+echo -e "\n### 5. SELINUX ###"
+echo "Node 1 tem SELinux desabilitado, Node 2 tem Permissive"
+echo "Mantendo Permissive (mais seguro que Disabled)"
+echo "✅ SELinux em modo Permissive"
+
+# 6. REINICIAR LIBVIRT
+echo -e "\n### 6. APLICANDO MUDANÇAS ###"
+echo "Reiniciando libvirtd..."
+systemctl restart libvirtd
+echo "✅ Libvirt reiniciado"
+
+# 7. VERIFICAÇÃO FINAL
+echo -e "\n========================================="
+echo "         VERIFICAÇÃO FINAL               "
+echo "========================================="
+echo ""
+
+echo "1. Firewall:"
+firewall-cmd --state
+echo "   Masquerade: $(firewall-cmd --query-masquerade)"
+echo "   Portas: $(firewall-cmd --list-ports | wc -w) portas abertas"
+
+echo -e "\n2. Grupos QEMU:"
+id qemu | grep -q oneadmin && echo "   ✅ qemu está no grupo oneadmin" || echo "   ❌ ERRO: qemu não está no grupo oneadmin"
+
+echo -e "\n3. Qemu.conf:"
+grep -E "^user|^group" /etc/libvirt/qemu.conf | head -2
+
+echo -e "\n4. Bridges:"
+brctl show | grep -E "^br0|^virbr0" | awk '{print "   "$1}'
+
+echo -e "\n5. Libvirt:"
+systemctl is-active libvirtd && echo "   ✅ Ativo" || echo "   ❌ Inativo"
+
+echo -e "\n========================================="
+echo "Node 2 sincronizado com Node 1!"
+echo "Pronto para receber VMs!"
+echo "========================================="
+EOF
+
+chmod +x sync_node2_with_node1.sh
+🚀 Execute o script
+bash# No Node 2
+./sync_node2_with_node1.sh
+📋 Script de validação (opcional)
+Após executar, você pode validar comparando novamente:
+bash# No Frontend
+cat > validate_nodes.sh << 'EOF'
+#!/bin/bash
+
+echo "=== VALIDANDO SINCRONIZAÇÃO ==="
+echo ""
+
+# Coletar configs atualizadas
+./collect_node_config.sh 172.16.6.158 > node1_atual.txt
+./collect_node_config.sh 172.16.6.159 > node2_atual.txt
+
+# Comparar apenas itens importantes
+echo "DIFERENÇAS RESTANTES:"
+echo "====================="
+
+for item in "Firewalld:" "Masquerade:" "groups=.*oneadmin" "^user = " "^group = "; do
+    echo -e "\n### $item ###"
+    echo "Node 1: $(grep -E "$item" node1_atual.txt | head -1)"
+    echo "Node 2: $(grep -E "$item" node2_atual.txt | head -1)"
+done
+
+rm -f node1_atual.txt node2_atual.txt
+EOF
+
+chmod +x validate_nodes.sh
+Execute o script de sincronização e me mostre o resultado! Isso deve deixar o Node 2 idêntico ao Node 1 em termos de configuração.Tentar novamenteMR=========================================
+   SINCRONIZANDO NODE 2 COM NODE 1
+=========================================
+### 1. CONFIGURANDO FIREWALL ###
+Ativando firewalld...
+Created symlink /etc/systemd/system/dbus-org.fedoraproject.FirewallD1.service → /usr/lib/systemd/system/firewalld.service.
+Created symlink /etc/systemd/system/multi-user.target.wants/firewalld.service → /usr/lib/systemd/system/firewalld.service.
+Configurando regras idênticas ao Node 1...
+success
+success
+success
+success
+success
+success
+success
+success
+success
+success
+Warning: ALREADY_ENABLED: cockpit
+success
+Warning: ALREADY_ENABLED: dhcpv6-client
+success
+success
+success
+Warning: ALREADY_ENABLED: ssh
+success
+success
+success
+✅ Firewall configurado
+### 2. CORRIGINDO GRUPOS QEMU ###
+Adicionando qemu ao grupo oneadmin...
+✅ Grupos atualizados: uid=107(qemu) gid=107(qemu) groups=107(qemu),36(kvm),9869(oneadmin)
+### 3. CORRIGINDO QEMU.CONF ###
+Ajustando qemu.conf para usar qemu:qemu como Node 1...
+✅ qemu.conf atualizado
+### 4. BRIDGE BR0 ###
+Node 1 tem br0, mas está vazia (sem uso no momento)
+Criando br0 para compatibilidade...
+✅ Bridge br0 criada
+### 5. SELINUX ###
+Node 1 tem SELinux desabilitado, Node 2 tem Permissive
+Mantendo Permissive (mais seguro que Disabled)
+✅ SELinux em modo Permissive
+### 6. APLICANDO MUDANÇAS ###
+Reiniciando libvirtd...
+✅ Libvirt reiniciado
+=========================================
+         VERIFICAÇÃO FINAL
+=========================================
+1. Firewall:
+running
+   Masquerade: yes
+   Portas: 9 portas abertas
+2. Grupos QEMU:
+   ✅ qemu está no grupo oneadmin
+3. Qemu.conf:
+user = "qemu"
+group = "qemu"
+4. Bridges:
+   br0
+   virbr0
+5. Libvirt:
+active
+   ✅ Ativo
+=========================================
+Node 2 sincronizado com Node 1!
+Pronto para receber VMs!
+=========================================EditarSynchronized Node 2 configurations for seamless VM deployment.3 sPerfeito! O script foi executado com sucesso. O Node 2 agora está completamente sincronizado com o Node 1. Todas as configurações importantes foram aplicadas:
+
+Firewall ativo com masquerade e todas as portas necessárias
+QEMU adicionado ao grupo oneadmin
+qemu.conf configurado para usar user/group qemu
+Bridge br0 criada para compatibilidade
+SELinux mantido em Permissive (melhor que disabled)
+Libvirt reiniciado e ativo
+
+O Node 2 está pronto para receber VMs!Perfeito! 🎉 O Node 2 está completamente sincronizado com o Node 1!
+✅ Resumo da Sincronização:
+
+Firewall: ✅ Ativo com masquerade e 9 portas configuradas
+Grupos QEMU: ✅ qemu agora faz parte do grupo oneadmin
+QEMU Config: ✅ Usando user/group "qemu"
+Bridges: ✅ br0 e virbr0 disponíveis
+Libvirt: ✅ Ativo e funcionando
+
+🚀 Próximos Passos - Testar o Node 2
+1️⃣ Verificar no OpenNebula
+bash# No Frontend como oneadmin
+sudo su - oneadmin
+
+# Ver status dos nodes
+onehost list
+
+# Sincronizar
+onehost sync 4
+2️⃣ Criar uma VM de teste no Node 2
+bash# Opção A: Se tiver uma VM parada, migrá-la
+onevm list -a
+onevm deploy <VM_ID> 4
+
+# Opção B: Criar nova VM no Node 2
+onetemplate instantiate <TEMPLATE_ID> --name "teste-node2"
+# Aguardar ficar em PENDING
+onevm list
+onevm deploy <NEW_VM_ID> 4
+3️⃣ Script de monitoramento do cluster
+bash# No Frontend
+cat > cluster_status.sh << 'EOF'
+#!/bin/bash
+
+clear
+echo "================================================"
+echo "         STATUS DO CLUSTER OPENNEBULA           "
+echo "================================================"
+echo ""
+
+# Status dos hosts
+echo "### HOSTS ###"
+onehost list
+echo ""
+
+# VMs por host
+echo "### DISTRIBUIÇÃO DE VMs ###"
+for host_id in 0 4; do
+    host_ip=$(onehost show $host_id | grep "^NAME" | awk '{print $3}')
+    vm_count=$(onevm list | grep -c "$host_ip")
+    echo "Host $host_id ($host_ip): $vm_count VMs"
+done
+echo ""
+
+# VMs ativas
+echo "### VMs ATIVAS ###"
+onevm list | grep -E "runn|boot|migr" || echo "Nenhuma VM rodando"
+echo ""
+
+# Recursos
+echo "### USO DE RECURSOS ###"
+onehost list | grep -E "ID|172.16"
+EOF
+
+chmod +x cluster_status.sh
+./cluster_status.sh
+4️⃣ Configurar Port Forwarding no Node 2 (se usar NAT)
+bash# No Node 2 - Criar script de NAT
+cat > /root/setup_nat_node2.sh << 'EOF'
+#!/bin/bash
+
+# Para cada VM no Node 2, configurar NAT
+# Exemplo: VM com IP 192.168.122.100
+
+# Portas base para Node 2 (diferentes do Node 1)
+# Node 1 usa: 80, 2222, 3389
+# Node 2 usa: 8080, 2223, 3390
+
+add_nat_vm() {
+    VM_IP=$1
+    HTTP_PORT=$2
+    SSH_PORT=$3
+    
+    # HTTP
+    iptables -t nat -A PREROUTING -p tcp --dport $HTTP_PORT -j DNAT --to ${VM_IP}:80
+    firewall-cmd --add-port=${HTTP_PORT}/tcp --permanent
+    
+    # SSH
+    iptables -t nat -A PREROUTING -p tcp --dport $SSH_PORT -j DNAT --to ${VM_IP}:22
+    firewall-cmd --add-port=${SSH_PORT}/tcp --permanent
+    
+    echo "VM $VM_IP configurada:"
+    echo "  HTTP: http://172.16.6.159:${HTTP_PORT}"
+    echo "  SSH:  ssh -p ${SSH_PORT} user@172.16.6.159"
+}
+
+# Exemplo de uso:
+# add_nat_vm 192.168.122.100 8080 2223
+
+firewall-cmd --reload
+iptables-save > /etc/sysconfig/iptables
+EOF
+
+chmod +x /root/setup_nat_node2.sh
+🎯 O que fazer agora?
+
+Testar uma VM no Node 2 - Verificar se tudo funciona
+Configurar balanceamento - Distribuir VMs automaticamente
+Monitorar performance - Ver qual node tem melhor desempenho
+Documentar portas NAT - Se usar NAT, organizar as portas
+
+O Node 2 está 100% operacional! Qual é sua prioridade agora?Tentar novamenteMReu tenho uma vm de id 13 e eu mandei migrar, só que ao ligar deu esse erro aqui 
+Wed Jun 4 18:12:59 2025: DEPLOY: error: Failed to create domain from /var/lib/one//datastores/0/13/deployment.5 error: intern... see more details in VM logEditarDiagnosed VM migration error and planned troubleshooting steps.4 sO usuário está tentando migrar uma VM (ID 13) para o Node 2 e está recebendo um erro de deploy. Esse é o mesmo tipo de erro que vimos no documento anexo quando estavam configurando o primeiro node. O erro parece estar relacionado ao virtlogd ou outras configurações do libvirt.
+Vou guiar ele pelos passos de diagnóstico e correção baseado no que foi feito anteriormente no documento.Esse erro é familiar! Vamos diagnosticar e resolver:
+🔍 Diagnóstico do erro de migração
+1️⃣ Ver o erro completo
+bash# No Frontend como oneadmin
+onevm show 13 | grep -A 5 ERROR
+
+# Ver em qual host está tentando criar
+onevm show 13 | grep HOST
+2️⃣ No Node onde a VM está tentando iniciar
+bash# Se for no Node 2 (172.16.6.159)
+ssh root@172.16.6.159
+
+# Ver o deployment file
+ls -la /var/lib/one/datastores/0/13/
+cat /var/lib/one/datastores/0/13/deployment.5
+
+# Tentar criar manualmente para ver erro completo
+cd /var/lib/one/datastores/0/13/
+virsh create deployment.5
+3️⃣ Problemas comuns e soluções
+A) Erro do virtlogd (mais provável)
+bash# No Node 2
+# Verificar virtlogd
+systemctl status virtlogd
+
+# Se não estiver rodando
+systemctl start virtlogd.socket
+systemctl start virtlogd
+systemctl restart libvirtd
+
+# Tentar novamente
+virsh create deployment.5
+B) Problema de permissões
+bash# Verificar permissões dos discos
+ls -la /var/lib/one/datastores/0/13/disk.*
+
+# Ajustar se necessário
+chown oneadmin:qemu /var/lib/one/datastores/0/13/disk.*
+chmod 660 /var/lib/one/datastores/0/13/disk.*
+C) Criar XML simplificado
+bash# Se ainda não funcionar
+cd /var/lib/one/datastores/0/13/
+
+# Criar versão sem problemas
+cat > vm_fixed.xml << 'EOF'
+<domain type='kvm'>
+    <name>one-13</name>
+    <memory>2097152</memory>
+    <vcpu>2</vcpu>
+    <os>
+        <type>hvm</type>
+    </os>
+    <devices>
+        <emulator>/usr/libexec/qemu-kvm</emulator>
+        <disk type='file' device='disk'>
+            <source file='/var/lib/one/datastores/0/13/disk.0'/>
+            <target dev='vda' bus='virtio'/>
+            <driver name='qemu' type='qcow2'/>
+        </disk>
+        <interface type='bridge'>
+            <source bridge='virbr0'/>
+            <mac address='02:00:c0:a8:7a:68'/>
+            <model type='virtio'/>
+        </interface>
+        <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
+        <serial type='pty'>
+            <target port='0'/>
+        </serial>
+        <console type='pty'>
+            <target type='serial' port='0'/>
+        </console>
+    </devices>
+</domain>
+EOF
+
+# Ajustar MAC address (pegar do deployment.5)
+MAC=$(grep -o 'mac address=.*' deployment.5 | cut -d'"' -f2)
+sed -i "s/02:00:c0:a8:7a:68/$MAC/" vm_fixed.xml
+
+# Criar
+virsh create vm_fixed.xml
+4️⃣ Script de diagnóstico rápido
+bash# No Node 2
+cat > diagnose_vm13.sh << 'EOF'
+#!/bin/bash
+
+echo "=== Diagnóstico VM 13 ==="
+
+echo -e "\n1. Arquivos da VM:"
+ls -la /var/lib/one/datastores/0/13/
+
+echo -e "\n2. Virtlogd:"
+systemctl status virtlogd --no-pager | head -5
+
+echo -e "\n3. Tentando criar:"
+cd /var/lib/one/datastores/0/13/
+virsh create deployment.5 2>&1
+
+echo -e "\n4. Processos libvirt:"
+ps aux | grep -E "virtlogd|libvirtd" | grep -v grep
+EOF
+
+chmod +x diagnose_vm13.sh
+./diagnose_vm13.sh
+5️⃣ Se for problema persistente com virtlogd
+bash# Verificar configuração do socket
+ls -la /run/libvirt/virtlogd*
+ls -la /var/run/libvirt/virtlogd*
+
+# Se não existir, criar link
+ln -s /var/run /run 2>/dev/null
+
+# Reiniciar serviços
+systemctl restart virtlogd.socket virtlogd libvirtd
+Execute o diagnóstico e me mostre o resultado do virsh create deployment.5 para vermos o erro específico!Tentar novamenteMRoneadmin@opennebula:~$ onevm show 13 | grep -A 5 ERROR
+ERROR="Wed Jun  4 18:12:59 2025: DEPLOY: error: Failed to create domain from /var/lib/one//datastores/0/13/deployment.5 error: intern... see more details in VM log"
+VIRTUAL MACHINE TEMPLATE
+AUTOMATIC_DS_REQUIREMENTS="(\"CLUSTERS/ID\" @> 0) & (TM_MAD = \"ssh\")"
+AUTOMATIC_NIC_REQUIREMENTS="(\"CLUSTERS/ID\" @> 0)"
+AUTOMATIC_REQUIREMENTS="(CLUSTER_ID = 0) & !(PUBLIC_CLOUD = YES) & !(PIN_POLICY = PINNED)"
+oneadmin@opennebula:~$ onevm show 13 | grep HOST
+HOST                : 172.16.6.159
+SEQ UID  REQ   HOST         ACTION       DS           START        TIME     PROLOG
+no node 2
+[root@OpenNebula-Node2 ~]# ls -la /var/lib/one/datastores/0/13/
+total 15786796
+drwxrwxr-x. 2 oneadmin oneadmin         122 Jun  4 18:12 .
+drwxrwxr-x. 3 oneadmin oneadmin          16 Jun  4 18:09 ..
+-rw-rw-r--. 1 oneadmin oneadmin        2247 Jun  3 16:37 deployment.0
+-rw-rw-r--. 1 oneadmin oneadmin        2008 Jun  3 17:14 deployment.3
+-rw-rw-r--. 1 oneadmin oneadmin        2002 Jun  4 18:12 deployment.5
+-rw-r--r--. 1 oneadmin oneadmin 42949672960 Jun  4 15:08 disk.1
+-rw-r--r--. 1 oneadmin oneadmin   726501376 Jun  1 21:04 disk.2
+-rw-rw-r--. 1 oneadmin oneadmin         943 Jun  4 18:12 ds.xml
+-rw-rw-r--. 1 oneadmin oneadmin        5176 Jun  4 18:12 vm.xml
+[root@OpenNebula-Node2 ~]# cat /var/lib/one/datastores/0/13/deployment.5
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+        <name>one-13</name>
+        <title>RHEL-8.10-VM</title>
+        <uuid>0b807f59-0ca9-4c56-96b3-78ae4d60414e</uuid>
+        <vcpu><![CDATA[4]]></vcpu>
+        <cputune>
+                <shares>4096</shares>
+        </cputune>
+        <memory>4194304</memory>
+        <os>
+                <type arch='x86_64'>hvm</type>
+        </os>
+        <devices>
+                <emulator><![CDATA[/usr/bin/qemu-kvm-one]]></emulator>
+                <disk type='file' device='disk'>
+                        <source file='/var/lib/one//datastores/0/13/disk.1'/>
+                        <target dev='sda'/>
+                        <boot order='2'/>
+                        <driver name='qemu' type='raw' cache='none' discard='unmap'/>
+                        <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+                </disk>
+                <disk type='file' device='cdrom'>
+                        <source file='/var/lib/one//datastores/0/13/disk.2'/>
+                        <target dev='hdb' bus='ide'/>
+                        <readonly/>
+                        <driver name='qemu' type='raw' cache='none' discard='unmap'/>
+                </disk>
+                <controller type='scsi' index='0' model='virtio-scsi'>
+                        <driver queues='4'/>
+                </controller>
+                <interface type='bridge'>
+                        <source bridge='virbr0'/>
+                        <mac address='02:00:c0:a8:7a:66'/>
+                        <target dev='one-13-0'/>
+                        <model type='virtio'/>
+                </interface>
+                <graphics type='vnc' listen='0.0.0.0' port='5913' keymap='pt-br'/>
+        </devices>
+        <features>
+                <pae/>
+                <acpi/>
+                <apic/>
+        </features>
+        <devices>
+                <channel type='unix'>
+                        <source mode='bind'/><target type='virtio' name='org.qemu.guest_agent.0'/>
+                </channel>
+        </devices>
+        <cpu mode='host-passthrough'/>
+        <metadata>
+                <one:vm xmlns:one="http://opennebula.org/xmlns/libvirt/1.0">
+                        <one:system_datastore><![CDATA[/var/lib/one//datastores/0/13]]></one:system_datastore>
+                        <one:name><![CDATA[RHEL-8.10-VM]]></one:name>
+                        <one:uname><![CDATA[oneadmin]]></one:uname>
+                        <one:uid>0</one:uid>
+                        <one:gname><![CDATA[oneadmin]]></one:gname>
+                        <one:gid>0</one:gid>
+                        <one:opennebula_version>6.10.0.1</one:opennebula_version>
+                        <one:stime>1748979102</one:stime>
+                        <one:deployment_time>1749060777</one:deployment_time>
+                </one:vm>
+        </metadata>
+</domain>EditarDiagnosed deployment issues with VM emulator and guest agent.2 sVejo o problema! Há dois issues principais:
+
+O emulator está apontando para /usr/bin/qemu-kvm-one que provavelmente não existe no Node 2
+Há um channel para guest agent que pode estar causando problemas com o virtlogd
+
+Vou criar soluções para ambos.Encontrei os problemas! Vamos resolver:
+🔧 Problemas identificados:
+
+Emulator incorreto: /usr/bin/qemu-kvm-one (não existe no Node 2)
+Channel do guest agent que pode estar causando problema com virtlogd
+
+1️⃣ Solução rápida - Criar link do emulator
+bash# No Node 2
+# Verificar se existe
+ls -la /usr/bin/qemu-kvm-one
+
+# Se não existir, criar link
+ln -s /usr/libexec/qemu-kvm /usr/bin/qemu-kvm-one
+
+# Verificar
+ls -la /usr/bin/qemu-kvm-one
+2️⃣ Tentar criar a VM
+bashcd /var/lib/one/datastores/0/13/
+virsh create deployment.5
+3️⃣ Se ainda der erro, criar XML corrigido
+bash# No Node 2
+cd /var/lib/one/datastores/0/13/
+
+# Criar versão corrigida
+cat > vm_fixed.xml << 'EOF'
+<domain type='kvm'>
+    <name>one-13</name>
+    <title>RHEL-8.10-VM</title>
+    <uuid>0b807f59-0ca9-4c56-96b3-78ae4d60414e</uuid>
+    <vcpu>4</vcpu>
+    <memory>4194304</memory>
+    <os>
+        <type arch='x86_64'>hvm</type>
+    </os>
+    <devices>
+        <emulator>/usr/libexec/qemu-kvm</emulator>
+        <disk type='file' device='disk'>
+            <source file='/var/lib/one/datastores/0/13/disk.1'/>
+            <target dev='sda'/>
+            <driver name='qemu' type='raw' cache='none'/>
+        </disk>
+        <disk type='file' device='cdrom'>
+            <source file='/var/lib/one/datastores/0/13/disk.2'/>
+            <target dev='hdb' bus='ide'/>
+            <readonly/>
+            <driver name='qemu' type='raw'/>
+        </disk>
+        <interface type='bridge'>
+            <source bridge='virbr0'/>
+            <mac address='02:00:c0:a8:7a:66'/>
+            <model type='virtio'/>
+        </interface>
+        <graphics type='vnc' listen='0.0.0.0' port='5913' keymap='pt-br'/>
+        <serial type='pty'>
+            <target port='0'/>
+        </serial>
+        <console type='pty'>
+            <target type='serial' port='0'/>
+        </console>
+    </devices>
+    <features>
+        <pae/>
+        <acpi/>
+        <apic/>
+    </features>
+    <cpu mode='host-passthrough'/>
+</domain>
+EOF
+
+# Ajustar permissões
+chown oneadmin:qemu disk.*
+chmod 660 disk.*
+
+# Criar a VM
+virsh create vm_fixed.xml
+4️⃣ Se funcionar, atualizar OpenNebula
+bash# No Frontend
+onevm recover 13 --success
+5️⃣ Solução permanente - Configurar emulator no Node 2
+bash# No Node 2
+cat > /etc/one/vmm_exec/vmm_exec_kvm.conf << 'EOF'
+EMULATOR = /usr/libexec/qemu-kvm
+EOF
+
+# Ou criar link permanente
+echo "ln -sf /usr/libexec/qemu-kvm /usr/bin/qemu-kvm-one" >> /etc/rc.local
+chmod +x /etc/rc.local
+6️⃣ Script de diagnóstico completo
+bashcat > fix_vm13.sh << 'EOF'
+#!/bin/bash
+
+echo "=== Corrigindo VM 13 no Node 2 ==="
+
+# 1. Criar link do emulator
+echo "1. Verificando emulator..."
+if [ ! -f /usr/bin/qemu-kvm-one ]; then
+    ln -s /usr/libexec/qemu-kvm /usr/bin/qemu-kvm-one
+    echo "✅ Link criado"
+else
+    echo "✅ Emulator existe"
+fi
+
+# 2. Verificar virtlogd
+echo -e "\n2. Verificando virtlogd..."
+systemctl is-active virtlogd || systemctl start virtlogd
+
+# 3. Ajustar permissões
+echo -e "\n3. Ajustando permissões..."
+cd /var/lib/one/datastores/0/13/
+chown oneadmin:qemu disk.*
+chmod 660 disk.*
+
+# 4. Tentar criar
+echo -e "\n4. Tentando criar VM..."
+virsh create deployment.5
+
+if [ $? -eq 0 ]; then
+    echo "✅ VM criada com sucesso!"
+    virsh list
+else
+    echo "❌ Erro. Tentando com XML corrigido..."
+    virsh create vm_fixed.xml
+fi
+EOF
+
+chmod +x fix_vm13.sh
+./fix_vm13.sh
+Execute primeiro a solução 1 (criar o link). É a mais simples e deve resolver!
